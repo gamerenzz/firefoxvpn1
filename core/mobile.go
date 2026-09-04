@@ -105,7 +105,13 @@ func StartVPN(tunFd int, proxyPassJWT string, selectedNode string, bridge Androi
 
 	// 3. 启动 Tun 虚拟网卡转发
 	logToUI("INFO", "Attaching tun2socks to TUN file descriptor: %d", tunFd)
-	tunCloser = vpnclient.StartTun2Socks(tunFd, 1500, localAddr)
+	closer, err := vpnclient.StartTun2Socks(tunFd, 1500, localAddr)
+	if err != nil {
+		logToUI("ERROR", "Failed to start tun2socks: %v", err)
+		bridge.OnStatusUpdate("FAILED")
+		return err
+	}
+	tunCloser = closer
 	logToUI("INFO", "VPN is fully running")
 	bridge.OnStatusUpdate("CONNECTED")
 	return nil
