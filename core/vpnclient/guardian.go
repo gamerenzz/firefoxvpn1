@@ -10,8 +10,8 @@ import (
 
 const GuardianEndpointDefault = "https://vpn.mozilla.org/api/v1/fpn/token"
 
-// GetProxyPassWithToken 用登录拿到的 AccessToken 换取 Fastly 认可的 Proxy-Pass JWT
-func GetProxyPassWithToken(accessToken string) (string, error) {
+// GetProxyPassWithToken 结合 DoH 与真实 Clean IP 获取 Proxy Pass
+func GetProxyPassWithToken(accessToken string, protectFn func(fd int)) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, GuardianEndpointDefault, nil)
 	if err != nil {
 		return "", err
@@ -20,7 +20,8 @@ func GetProxyPassWithToken(accessToken string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "MozillaVPN/2.35.0 (sys:android)")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	// 使用防 DNS 污染与防握手阻断的专用 Client
+	client := NewAntiCensorshipHTTPClient(10*time.Second, protectFn)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("guardian request failed: %w", err)
