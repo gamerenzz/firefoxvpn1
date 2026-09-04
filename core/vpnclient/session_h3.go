@@ -7,10 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
-	"strings"
-	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -19,7 +16,7 @@ import (
 
 type H3Session struct {
 	rt        *http3.Transport
-	conn      *quic.Conn
+	conn      quic.Connection // 修复：quic-go 标准接口类型
 	udpConn   *net.UDPConn
 	proxyHost string
 	token     string
@@ -39,12 +36,13 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 		return nil, fmt.Errorf("resolve %s failed: %w", host, err)
 	}
 
-	// 创建 UDP 并执行 Android VpnService.protect()
+	// 创建 UDP 套接字
 	uc, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
 	if err != nil {
 		return nil, err
 	}
 
+	// 核心：执行 Android VpnService.protect() 防回环
 	if protectFn != nil {
 		rawConn, err := uc.SyscallConn()
 		if err == nil {
@@ -75,7 +73,7 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 	}
 
 	rt := &http3.Transport{
-		Dial: func(_ context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+		Dial: func(_ context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.Connection, error) {
 			return qConn, nil
 		},
 	}
@@ -122,7 +120,7 @@ func (s *H3Session) Close() error {
 		s.rt.Close()
 	}
 	if s.conn != nil {
-		(*s.conn).CloseWithError(0, "")
+		_ = s.conn.CloseWithError(0, "")
 	}
 	if s.udpConn != nil {
 		s.udpConn.Close()
