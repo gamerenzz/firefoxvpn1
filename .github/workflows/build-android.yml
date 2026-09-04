@@ -39,6 +39,7 @@ jobs:
       - name: Compile Go Core to AAR
         run: |
           cd core
+          go get golang.org/x/mobile/bind
           go mod tidy
           mkdir -p ../android/app/libs
           gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
