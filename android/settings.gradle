@@ -1,0 +1,21 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // 关键：声明让 Gradle 能加载 gomobile 编译产出的 core.aar
+        flatDir {
+            dirs 'app/libs'
+        }
+    }
+}
+
+rootProject.name = "FirefoxVPN"
+include ':app'
