@@ -3,10 +3,12 @@ package com.firefoxvpn.app
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
@@ -32,6 +34,15 @@ class MainActivity : Activity(), AndroidBridge {
     private var currentSessionToken = ""
     private var token = ""
 
+    // 接收后台 Service 发来的连接日志
+    private val logReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val level = intent?.getStringExtra(FpnVpnService.EXTRA_LOG_LEVEL) ?: "INFO"
+            val msg = intent?.getStringExtra(FpnVpnService.EXTRA_LOG_MSG) ?: ""
+            onLog(level, msg)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -47,13 +58,17 @@ class MainActivity : Activity(), AndroidBridge {
         val btnCopyAll = findViewById<Button>(R.id.btnCopyAll)
         val btnClearLog = findViewById<Button>(R.id.btnClearLog)
 
-        // 注册桥接对象，使得所有阶段日志都能实时输出到底部面板
         Core.registerBridge(this)
-
-        // Android 13+ 提前动态请求通知栏权限（防止前台服务被系统直接闪退）
         checkNotificationPermission()
 
-        // 1. 账号密码直接登录
+        // 注册广播监听
+        val filter = IntentFilter(FpnVpnService.ACTION_VPN_LOG)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(logReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(logReceiver, filter)
+        }
+
         btnLogin.setOnClickListener {
             val email = etEmail.text.toString().trim()
             val password = etPassword.text.toString().trim()
@@ -69,9 +84,7 @@ class MainActivity : Activity(), AndroidBridge {
                     val result = Core.loginWithPassword(email, password)
                     if (result.need2FA) {
                         currentSessionToken = result.sessionToken
-                        runOnUiThread {
-                            show2FADialog()
-                        }
+                        runOnUiThread { show2FADialog() }
                     } else {
                         token = result.accessToken
                         runOnUiThread {
@@ -85,14 +98,11 @@ class MainActivity : Activity(), AndroidBridge {
             }.start()
         }
 
-        // 2. 连接 VPN 按钮
         btnConnect.setOnClickListener {
             if (token.isEmpty()) {
                 Toast.makeText(this, "请先登录账号", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-
-            // 调用系统 VpnService 鉴权准备
             val vpnIntent = VpnService.prepare(this)
             if (vpnIntent != null) {
                 startActivityForResult(vpnIntent, 100)
@@ -101,26 +111,23 @@ class MainActivity : Activity(), AndroidBridge {
             }
         }
 
-        // 3. 全选复制日志
         btnCopyAll.setOnClickListener {
             val fullText = etLogs.text.toString()
             if (fullText.isNotEmpty()) {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = ClipData.newPlainText("VPN Logs", fullText)
-                clipboard.setPrimaryClip(clip)
-                Toast.makeText(this, "日志已全选复制到剪贴板", Toast.LENGTH_SHORT).show()
+                clipboard.setPrimaryClip(ClipData.newPlainText("VPN Logs", fullText))
+                Toast.makeText(this, "日志已全选复制", Toast.LENGTH_SHORT).show()
             }
         }
 
-        // 4. 清空日志面板
-        btnClearLog.setOnClickListener {
-            etLogs.setText("")
-        }
+        btnClearLog.setOnClickListener { etLogs.setText("") }
     }
 
-    /**
-     * 针对 Android 13+ 检查并申请 POST_NOTIFICATIONS 权限，防止启动 Service 崩溃
-     */
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(logReceiver)
+    }
+
     private fun checkNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -134,12 +141,9 @@ class MainActivity : Activity(), AndroidBridge {
         }
     }
 
-    /**
-     * 二次验证码弹窗
-     */
     private fun show2FADialog() {
         val input = EditText(this).apply {
-            hint = "输入邮箱中收到的 6 位验证码"
+            hint = "输入邮箱 6 位验证码"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
 
@@ -148,7 +152,7 @@ class MainActivity : Activity(), AndroidBridge {
             .setMessage("已向您的邮箱发送了登录确认码，请输入：")
             .setView(input)
             .setCancelable(false)
-            .setPositiveButton("确认验证") { _, _ ->
+            .setPositiveButton("确认") { _, _ ->
                 val code = input.text.toString().trim()
                 if (code.isNotEmpty()) {
                     Thread {
@@ -160,7 +164,7 @@ class MainActivity : Activity(), AndroidBridge {
                                 Toast.makeText(this, "验证成功！", Toast.LENGTH_SHORT).show()
                             }
                         } catch (e: Exception) {
-                            onLog("ERROR", "2FA validation failed: ${e.message}")
+                            onLog("ERROR", "2FA failed: ${e.message}")
                         }
                     }.start()
                 }
@@ -168,55 +172,30 @@ class MainActivity : Activity(), AndroidBridge {
             .show()
     }
 
-    /**
-     * 接收 VPN 权限授予回调，启动后台隧道服务
-     */
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == 100 && resultCode == RESULT_OK) {
             onLog("INFO", "VPN permission granted. Launching tunnel service...")
             val intent = Intent(this, FpnVpnService::class.java).apply {
-                // 传入刚才登录拿到的官方 AccessToken
                 putExtra("ACCESS_TOKEN", token)
-                // 默认选择延迟极低的 Fastly 东京节点测试
-                putExtra("NODE", "tokyo.m1.fastly-masque.net:443")
             }
-            
-            // 安全启动前台服务
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(intent)
-                } else {
-                    startService(intent)
-                }
-            } catch (e: Exception) {
-                onLog("ERROR", "Failed to start service: ${e.message}")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
             }
-        } else if (requestCode == 100) {
-            onLog("WARN", "User cancelled or denied VPN permission.")
         }
     }
 
-    // ==========================================
-    // Core.AndroidBridge 接口实现
-    // ==========================================
-
-    override fun protectSocket(fd: Long): Boolean {
-        return true
-    }
+    override fun protectSocket(fd: Long): Boolean = true
 
     override fun onStatusUpdate(status: String?) {
-        runOnUiThread {
-            tvStatus.text = "状态: $status"
-        }
+        runOnUiThread { tvStatus.text = "状态: $status" }
     }
 
     override fun onLog(level: String?, message: String?) {
         runOnUiThread {
             etLogs.append("[$level] $message\n")
-            // 自动滚动到最新日志
-            scrollLog.post {
-                scrollLog.fullScroll(ScrollView.FOCUS_DOWN)
-            }
+            scrollLog.post { scrollLog.fullScroll(ScrollView.FOCUS_DOWN) }
         }
     }
 }
