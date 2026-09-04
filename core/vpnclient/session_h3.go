@@ -16,7 +16,7 @@ import (
 
 type H3Session struct {
 	rt        *http3.Transport
-	conn      quic.EarlyConnection // 修复：匹配 http3 的 EarlyConnection 类型
+	conn      quic.EarlyConnection
 	udpConn   *net.UDPConn
 	proxyHost string
 	token     string
@@ -28,21 +28,30 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 	if err != nil {
 		return nil, err
 	}
-	port, _ := strconv.Atoi(portStr)
-
-	// 解析 IP
-	ips, err := net.LookupIP(host)
-	if err != nil || len(ips) == 0 {
-		return nil, fmt.Errorf("resolve %s failed: %w", host, err)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy port %s: %w", portStr, err)
 	}
 
-	// 创建 UDP 套接字
+	// 核心修复：优先通过 DoH 获取未被国内运营商污染/拦截的真实 IP，彻底解决 "no such host"
+	cleanIPStr := ResolveCleanIP(host)
+	targetIP := net.ParseIP(cleanIPStr)
+	if targetIP == nil {
+		// 如果 DoH 没直接返回纯 IP，退回使用系统底层解析
+		ips, err := net.LookupIP(host)
+		if err != nil || len(ips) == 0 {
+			return nil, fmt.Errorf("resolve %s failed: %w", host, err)
+		}
+		targetIP = ips[0]
+	}
+
+	// 1. 创建本地 UDP 套接字
 	uc, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listen udp failed: %w", err)
 	}
 
-	// 核心：执行 Android VpnService.protect() 防回环
+	// 2. 执行 Android VpnService.protect() 防回环（生命线）
 	if protectFn != nil {
 		rawConn, err := uc.SyscallConn()
 		if err == nil {
@@ -53,7 +62,7 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 	}
 
 	tlsCfg := &tls.Config{
-		ServerName: host,
+		ServerName: host, // TLS SNI 依然保留节点域名，保证证书验证通过
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{"h3"},
 	}
@@ -65,15 +74,14 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	udpRemote := &net.UDPAddr{IP: ips[0], Port: port}
-	// 修复：使用 DialEarly 建立支持 0-RTT 的早期连接
+	// 3. 目标地址使用真实解析出来的 targetIP
+	udpRemote := &net.UDPAddr{IP: targetIP, Port: port}
 	qConn, err := quic.DialEarly(ctx, uc, udpRemote, tlsCfg, quicCfg)
 	if err != nil {
 		uc.Close()
-		return nil, fmt.Errorf("quic dial early: %w", err)
+		return nil, fmt.Errorf("quic dial early to %s (%s): %w", host, targetIP.String(), err)
 	}
 
-	// 修复：返回签名严格对齐 http3.Transport.Dial
 	rt := &http3.Transport{
 		Dial: func(_ context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			return qConn, nil
