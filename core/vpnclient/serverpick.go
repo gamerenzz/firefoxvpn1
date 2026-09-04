@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -13,7 +14,7 @@ type ServerCandidate struct {
 	Latency  time.Duration
 }
 
-// ProbeFastestNode 针对节点列表进行并发 RTT 测速（附带保护 Hook 防止回环）
+// ProbeFastestNode 针对候选节点列表进行并发 RTT 测速（带 Socket 保护）
 func ProbeFastestNode(endpoints []string, timeout time.Duration, protectFn func(fd int)) string {
 	if len(endpoints) == 0 {
 		return ""
@@ -32,7 +33,7 @@ func ProbeFastestNode(endpoints []string, timeout time.Duration, protectFn func(
 			defer wg.Done()
 			d := net.Dialer{
 				Timeout: timeout,
-				Control: func(network, address string, c syscallRawConn) error {
+				Control: func(network, address string, c syscall.RawConn) error {
 					if protectFn != nil {
 						return c.Control(func(fd uintptr) {
 							protectFn(int(fd))
@@ -62,8 +63,4 @@ func ProbeFastestNode(endpoints []string, timeout time.Duration, protectFn func(
 		}
 	}
 	return best
-}
-
-type syscallRawConn interface {
-	Control(f func(fd uintptr)) error
 }
