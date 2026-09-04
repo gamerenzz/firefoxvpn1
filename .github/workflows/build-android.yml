@@ -13,10 +13,11 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # 1. 严格锁定 Go 版本为 1.22，彻底阻断 Go 自动漂移到 1.26
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.22.10'
           cache: false
 
       - name: Setup Java
@@ -30,22 +31,23 @@ jobs:
         with:
           ndk-version: r26b
 
+      # 2. 锁定安装稳定版 gomobile 工具，拒绝 @latest 的激进规则
       - name: Install Gomobile Tools
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20231127183840-761114570d31
+          go install golang.org/x/mobile/cmd/gobind@v0.0.0-20231127183840-761114570d31
           gomobile init
 
+      # 3. 编译 AAR（关闭 Go 自动工具链升级 GOTOOLCHAIN=local）
       - name: Compile Go Core to AAR
+        env:
+          GOTOOLCHAIN: local
         run: |
           cd core
-          # 自动获取官方代理上真实存在的最新合法版本，不手写伪版本号
-          go get golang.org/x/mobile@latest
-          go get golang.org/x/mobile/bind@latest
-          go mod tidy
           mkdir -p ../android/app/libs
           gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
 
+      # 4. 构建 Android APK
       - name: Build Android APK
         run: |
           cd android
@@ -55,6 +57,7 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleDebug --stacktrace
 
+      # 5. 上传 APK 产物
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
