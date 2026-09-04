@@ -43,7 +43,6 @@ func RegisterBridge(bridge AndroidBridge) {
 	logToUI("INFO", "Bridge registered successfully")
 }
 
-// LoginWithPassword 原生账号密码登录（彻底告别浏览器和 109 错误）
 func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
 	logToUI("INFO", "Logging in with official Mozilla VPN client ID...")
 	resp, err := vpnclient.DirectLogin(email, password)
@@ -52,7 +51,6 @@ func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
 		return nil, err
 	}
 
-	// 如果需要输入邮箱验证码
 	if !resp.Verified {
 		logToUI("WARN", "Account requires email 2FA verification")
 		return &DirectLoginResult{
@@ -61,7 +59,6 @@ func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
 		}, nil
 	}
 
-	// 如果已验证，直接换取 OAuth AccessToken
 	logToUI("INFO", "Exchanging session token for VPN AccessToken...")
 	token, err := vpnclient.ExchangeSessionToOAuthToken(resp.SessionToken)
 	if err != nil {
@@ -76,7 +73,6 @@ func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
 	}, nil
 }
 
-// Submit2FACode 提交邮箱验证码
 func Submit2FACode(sessionToken, code string) (string, error) {
 	logToUI("INFO", "Submitting 2FA verification code...")
 	if err := vpnclient.VerifySessionCode(sessionToken, code); err != nil {
@@ -93,12 +89,28 @@ func Submit2FACode(sessionToken, code string) (string, error) {
 	return token, nil
 }
 
-// StartEngine 启动底层 HTTP/3 隧道
-func StartEngine(proxyPassJWT string, selectedNode string, bridge AndroidBridge) (string, error) {
+// StartEngine 自动用 AccessToken 换取 ProxyPass，并建立隧道，安全拦截所有异常
+func StartEngine(accessToken string, selectedNode string, bridge AndroidBridge) (string, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logToUI("FATAL", "Recovered from panic: %v", r)
+		}
+	}()
+
 	RegisterBridge(bridge)
-	logToUI("INFO", "Starting H3 MASQUE Engine -> %s", selectedNode)
 	bridge.OnStatusUpdate("CONNECTING")
 
+	// 1. 先用 AccessToken 向 Guardian 换取真正的 Proxy Pass (JWT)
+	logToUI("INFO", "Fetching Proxy Pass from Mozilla Guardian...")
+	proxyPassJWT, err := vpnclient.GetProxyPassWithToken(accessToken)
+	if err != nil {
+		logToUI("ERROR", "Fetch Proxy Pass failed: %v", err)
+		bridge.OnStatusUpdate("FAILED")
+		return "", err
+	}
+	logToUI("INFO", "Proxy Pass obtained! Starting H3 MASQUE -> %s", selectedNode)
+
+	// 2. 建立 HTTP/3 隧道
 	session, err := vpnclient.NewH3Session(selectedNode, proxyPassJWT, 15*time.Second, func(fd int) {
 		bridge.ProtectSocket(fd)
 	})
@@ -109,6 +121,7 @@ func StartEngine(proxyPassJWT string, selectedNode string, bridge AndroidBridge)
 	}
 	activeSession = session
 
+	// 3. 启动本地代理
 	br, localAddr, err := vpnclient.StartLocalSocksBridge(session)
 	if err != nil {
 		logToUI("ERROR", "Local SOCKS Bridge Failed: %v", err)
@@ -117,7 +130,7 @@ func StartEngine(proxyPassJWT string, selectedNode string, bridge AndroidBridge)
 	}
 	localBridge = br
 
-	logToUI("INFO", "VPN Core Online, SOCKS5 at: %s", localAddr)
+	logToUI("INFO", "VPN Core Online! Listening at: %s", localAddr)
 	bridge.OnStatusUpdate("CONNECTED")
 	return localAddr, nil
 }
