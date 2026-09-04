@@ -30,7 +30,6 @@ jobs:
         with:
           ndk-version: r26b
 
-      # 关键修改：直接克隆官方仓库安装 gomobile，彻底避开版本号解析失败问题
       - name: Install Gomobile Tools from Source
         run: |
           git clone --depth 1 https://github.com/golang/mobile.git /tmp/gomobile
@@ -38,13 +37,15 @@ jobs:
           cd /tmp/gomobile/cmd/gobind && go install .
           gomobile init
 
-      # 关键修改：利用刚刚源码克隆的本地路径，无缝完成绑定，零外部代理依赖
       - name: Compile Go Core to AAR
         run: |
           cd core
-          # 将本地真实源码目录替换给当前模块，保证编译绝对能找到 gomobile
+          # 1. 声明本地源码路径
           go mod edit -replace golang.org/x/mobile=/tmp/gomobile
+          # 2. 引入真实依赖（由于有了 tools.go，它会永久驻留在依赖图中）
+          go get golang.org/x/mobile/bind
           go mod tidy
+          # 3. 产出 aar
           mkdir -p ../android/app/libs
           gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
 
