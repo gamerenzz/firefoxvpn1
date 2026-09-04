@@ -16,7 +16,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.23'
           cache: false
 
       - name: Setup Java
@@ -30,7 +30,7 @@ jobs:
         with:
           ndk-version: r26b
 
-      - name: Install Gomobile Tool
+      - name: Install Gomobile Tools
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
@@ -39,8 +39,9 @@ jobs:
       - name: Compile Go Core to AAR
         run: |
           cd core
-          # 按照官方提示添加 tool 绑定依赖
-          go get -tool golang.org/x/mobile/cmd/gobind
+          # 自动获取官方代理上真实存在的最新合法版本，不手写伪版本号
+          go get golang.org/x/mobile@latest
+          go get golang.org/x/mobile/bind@latest
           go mod tidy
           mkdir -p ../android/app/libs
           gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
