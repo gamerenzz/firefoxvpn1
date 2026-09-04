@@ -3,8 +3,6 @@ package core
 import (
 	"firefox-vpn-core/vpnclient"
 	"fmt"
-	"io"
-	"net"
 	"sync"
 	"time"
 )
@@ -12,13 +10,12 @@ import (
 type AndroidBridge interface {
 	ProtectSocket(fd int) bool
 	OnStatusUpdate(status string)
-	OnLog(level string, message string) // 新增：日志回调
+	OnLog(level string, message string)
 }
 
 var (
 	activeSession *vpnclient.H3Session
-	tunCloser     io.Closer
-	socksListener net.Listener
+	localBridge   *vpnclient.LocalBridge
 	bridgeInstance AndroidBridge
 	bridgeMu       sync.RWMutex
 )
@@ -58,83 +55,49 @@ func FinishAuthCode(code, verifier string) (string, error) {
 		logToUI("ERROR", "Token Exchange Error: %v", err)
 		return "", err
 	}
-	logToUI("INFO", "Token obtained successfully (Length: %d)", len(token))
+	logToUI("INFO", "Token obtained successfully")
 	return token, nil
 }
 
-func StartVPN(tunFd int, proxyPassJWT string, selectedNode string, bridge AndroidBridge) error {
+// StartEngine 启动底层 HTTP/3 隧道，并返回绑定的本地回环端口
+func StartEngine(proxyPassJWT string, selectedNode string, bridge AndroidBridge) (string, error) {
 	RegisterBridge(bridge)
-	logToUI("INFO", "Starting VPN pipeline, target node: %s", selectedNode)
+	logToUI("INFO", "Starting H3 MASQUE Engine -> %s", selectedNode)
 	bridge.OnStatusUpdate("CONNECTING")
 
-	// 1. 建立 H3 会话
 	session, err := vpnclient.NewH3Session(selectedNode, proxyPassJWT, 15*time.Second, func(fd int) {
-		if !bridge.ProtectSocket(fd) {
-			logToUI("WARN", "Protect socket returned false, fd: %d", fd)
-		} else {
-			logToUI("DEBUG", "Socket %d protected", fd)
-		}
+		bridge.ProtectSocket(fd)
 	})
 	if err != nil {
-		logToUI("ERROR", "Failed to build HTTP/3 upstream: %v", err)
+		logToUI("ERROR", "H3 Connection Failed: %v", err)
 		bridge.OnStatusUpdate("FAILED")
-		return err
+		return "", err
 	}
 	activeSession = session
-	logToUI("INFO", "HTTP/3 CONNECT session established")
 
-	// 2. 本地回环 SOCKS
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	br, localAddr, err := vpnclient.StartLocalSocksBridge(session)
 	if err != nil {
-		logToUI("ERROR", "Local SOCKS listen failed: %v", err)
-		return err
-	}
-	socksListener = l
-	localAddr := l.Addr().String()
-	logToUI("INFO", "Internal loopback SOCKS listening on: %s", localAddr)
-
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			go handleSocksConn(conn, activeSession)
-		}
-	}()
-
-	// 3. 启动 Tun 虚拟网卡转发
-	logToUI("INFO", "Attaching tun2socks to TUN file descriptor: %d", tunFd)
-	closer, err := vpnclient.StartTun2Socks(tunFd, 1500, localAddr)
-	if err != nil {
-		logToUI("ERROR", "Failed to start tun2socks: %v", err)
+		logToUI("ERROR", "Local SOCKS Bridge Failed: %v", err)
 		bridge.OnStatusUpdate("FAILED")
-		return err
+		return "", err
 	}
-	tunCloser = closer
-	logToUI("INFO", "VPN is fully running")
+	localBridge = br
+
+	logToUI("INFO", "VPN Core Online, SOCKS5 at: %s", localAddr)
 	bridge.OnStatusUpdate("CONNECTED")
-	return nil
+	return localAddr, nil
 }
 
-func StopVPN() {
-	logToUI("INFO", "Stopping VPN...")
-	if tunCloser != nil {
-		tunCloser.Close()
-	}
-	if socksListener != nil {
-		socksListener.Close()
+func StopEngine() {
+	logToUI("INFO", "Stopping Core Engine...")
+	if localBridge != nil {
+		localBridge.Close()
 	}
 	if activeSession != nil {
 		activeSession.Close()
 	}
-	logToUI("INFO", "VPN stopped completely")
+	logToUI("INFO", "Core Engine stopped")
 	if bridgeInstance != nil {
 		bridgeInstance.OnStatusUpdate("DISCONNECTED")
 	}
-}
-
-func handleSocksConn(client net.Conn, session *vpnclient.H3Session) {
-	defer client.Close()
-	// 此处保持之前的隧道转发逻辑，并在发生连接错误时调用 logToUI 记录
 }
