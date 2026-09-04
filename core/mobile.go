@@ -13,10 +13,10 @@ type AndroidBridge interface {
 	OnLog(level string, message string)
 }
 
-// AuthSessionResult 封装为结构体，完全符合 Gomobile 跨语言规范
-type AuthSessionResult struct {
-	AuthURL  string
-	Verifier string
+type DirectLoginResult struct {
+	SessionToken string
+	Need2FA      bool
+	AccessToken  string
 }
 
 var (
@@ -43,33 +43,57 @@ func RegisterBridge(bridge AndroidBridge) {
 	logToUI("INFO", "Bridge registered successfully")
 }
 
-// InitAuthURL 改为返回 (*AuthSessionResult, error)，100% 兼容 Java
-func InitAuthURL() (*AuthSessionResult, error) {
-	logToUI("INFO", "Initializing PKCE OAuth flow...")
-	sess, err := vpnclient.GeneratePKCEAuthURL()
+// LoginWithPassword 原生账号密码登录（彻底告别浏览器和 109 错误）
+func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
+	logToUI("INFO", "Logging in with official Mozilla VPN client ID...")
+	resp, err := vpnclient.DirectLogin(email, password)
 	if err != nil {
-		logToUI("ERROR", "PKCE Gen Failed: %v", err)
+		logToUI("ERROR", "Login failed: %v", err)
 		return nil, err
 	}
-	logToUI("INFO", "OAuth URL generated successfully")
-	return &AuthSessionResult{
-		AuthURL:  sess.AuthURL,
-		Verifier: sess.Verifier,
+
+	// 如果需要输入邮箱验证码
+	if !resp.Verified {
+		logToUI("WARN", "Account requires email 2FA verification")
+		return &DirectLoginResult{
+			SessionToken: resp.SessionToken,
+			Need2FA:      true,
+		}, nil
+	}
+
+	// 如果已验证，直接换取 OAuth AccessToken
+	logToUI("INFO", "Exchanging session token for VPN AccessToken...")
+	token, err := vpnclient.ExchangeSessionToOAuthToken(resp.SessionToken)
+	if err != nil {
+		logToUI("ERROR", "Exchange OAuth token failed: %v", err)
+		return nil, err
+	}
+
+	logToUI("INFO", "Login SUCCESS! Token obtained.")
+	return &DirectLoginResult{
+		AccessToken: token,
+		Need2FA:     false,
 	}, nil
 }
 
-func FinishAuthCode(code, verifier string) (string, error) {
-	logToUI("INFO", "Exchanging Auth Code for Access Token...")
-	token, err := vpnclient.ExchangeCode(code, verifier)
-	if err != nil {
-		logToUI("ERROR", "Token Exchange Error: %v", err)
+// Submit2FACode 提交邮箱验证码
+func Submit2FACode(sessionToken, code string) (string, error) {
+	logToUI("INFO", "Submitting 2FA verification code...")
+	if err := vpnclient.VerifySessionCode(sessionToken, code); err != nil {
+		logToUI("ERROR", "Verify code failed: %v", err)
 		return "", err
 	}
-	logToUI("INFO", "Token obtained successfully")
+	logToUI("INFO", "Code verified! Exchanging for VPN AccessToken...")
+	token, err := vpnclient.ExchangeSessionToOAuthToken(sessionToken)
+	if err != nil {
+		logToUI("ERROR", "Exchange token failed: %v", err)
+		return "", err
+	}
+	logToUI("INFO", "2FA Authentication SUCCESS!")
 	return token, nil
 }
 
-// StartEngine 启动底层 HTTP/3 隧道，并返回绑定的本地回环端口
+// StartEngine 启动底层 HTTP/3 隧道
 func StartEngine(proxyPassJWT string, selectedNode string, bridge AndroidBridge) (string, error) {
 	RegisterBridge(bridge)
 	logToUI("INFO", "Starting H3 MASQUE Engine -> %s", selectedNode)
