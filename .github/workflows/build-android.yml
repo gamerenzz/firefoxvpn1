@@ -30,6 +30,12 @@ jobs:
         with:
           ndk-version: r26b
 
+      # 关键修正：官方锁定 Gradle 8.4，坚决不用测试版的 Gradle 9
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
+
       - name: Install Gomobile Tools from Source
         run: |
           git clone --depth 1 https://github.com/golang/mobile.git /tmp/gomobile
@@ -40,19 +46,16 @@ jobs:
       - name: Compile Go Core to AAR
         run: |
           cd core
-          # 1. 声明本地源码路径
           go mod edit -replace golang.org/x/mobile=/tmp/gomobile
-          # 2. 引入真实依赖（由于有了 tools.go，它会永久驻留在依赖图中）
           go get golang.org/x/mobile/bind
           go mod tidy
-          # 3. 产出 aar
           mkdir -p ../android/app/libs
           gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
 
       - name: Build Android APK
         run: |
           cd android
-          # 使用 Actions 环境内置的 gradle 命令直接构建
+          # 使用 setup-gradle 注入的 Gradle 8.4 构建
           gradle assembleDebug --stacktrace
 
       - name: Upload APK
