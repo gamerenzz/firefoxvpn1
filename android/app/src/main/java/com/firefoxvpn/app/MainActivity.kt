@@ -33,6 +33,8 @@ class MainActivity : Activity(), AndroidBridge {
 
     private var currentSessionToken = ""
     private var token = ""
+    private val PREFS_NAME = "FirefoxVPNPrefs"
+    private val KEY_SAVED_TOKEN = "SavedProxyToken"
 
     // 接收后台 Service 发来的连接日志
     private val logReceiver = object : BroadcastReceiver() {
@@ -69,6 +71,10 @@ class MainActivity : Activity(), AndroidBridge {
             registerReceiver(logReceiver, filter)
         }
 
+        // 读取本地缓存的凭证（避免每次都要重新向 Guardian 申请）
+        loadSavedToken()
+
+        // 1. 账号密码直接登录
         btnLogin.setOnClickListener {
             val email = etEmail.text.toString().trim()
             val password = etPassword.text.toString().trim()
@@ -87,6 +93,7 @@ class MainActivity : Activity(), AndroidBridge {
                         runOnUiThread { show2FADialog() }
                     } else {
                         token = result.accessToken
+                        saveToken(token)
                         runOnUiThread {
                             tvStatus.text = "状态: 登录成功，可连接"
                             Toast.makeText(this, "登录成功！", Toast.LENGTH_SHORT).show()
@@ -98,9 +105,10 @@ class MainActivity : Activity(), AndroidBridge {
             }.start()
         }
 
+        // 2. 连接 VPN
         btnConnect.setOnClickListener {
             if (token.isEmpty()) {
-                Toast.makeText(this, "请先登录账号", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "请先登录账号，或长按此按钮导入 Token", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             val vpnIntent = VpnService.prepare(this)
@@ -111,6 +119,13 @@ class MainActivity : Activity(), AndroidBridge {
             }
         }
 
+        // 核心增强：长按“连接 VPN”按钮，直接弹出手动导入 Token 弹窗（脱困利器）
+        btnConnect.setOnLongClickListener {
+            showImportTokenDialog()
+            true
+        }
+
+        // 3. 全选复制日志
         btnCopyAll.setOnClickListener {
             val fullText = etLogs.text.toString()
             if (fullText.isNotEmpty()) {
@@ -120,12 +135,55 @@ class MainActivity : Activity(), AndroidBridge {
             }
         }
 
+        // 4. 清空日志
         btnClearLog.setOnClickListener { etLogs.setText("") }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(logReceiver)
+    }
+
+    private fun loadSavedToken() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val saved = prefs.getString(KEY_SAVED_TOKEN, "") ?: ""
+        if (saved.isNotEmpty()) {
+            token = saved
+            tvStatus.text = "状态: 已加载缓存凭证，可连接"
+            onLog("INFO", "Loaded cached token from storage (Length: ${token.length})")
+        }
+    }
+
+    private fun saveToken(t: String) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_SAVED_TOKEN, t).apply()
+    }
+
+    /**
+     * 手动导入 Token / Proxy Pass 弹窗（长按连接按钮触发，绕过国内 Guardian 阻断）
+     */
+    private fun showImportTokenDialog() {
+        val input = EditText(this).apply {
+            hint = "在此粘贴 AccessToken 或以 eyJ... 开头的 Proxy Pass"
+            maxLines = 6
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("手动导入凭证 (脱困通道)")
+            .setMessage("若因网络原因无法自动获取凭证，可在此直接粘贴已有 Token：")
+            .setView(input)
+            .setPositiveButton("保存并就绪") { _, _ ->
+                val text = input.text.toString().trim()
+                if (text.isNotEmpty()) {
+                    token = text
+                    saveToken(token)
+                    tvStatus.text = "状态: 凭证已手动就绪，可连接"
+                    onLog("INFO", "Manual token imported successfully (Length: ${text.length})")
+                    Toast.makeText(this, "凭证导入成功！点击连接即可", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun checkNotificationPermission() {
@@ -159,6 +217,7 @@ class MainActivity : Activity(), AndroidBridge {
                         try {
                             val accessToken = Core.submit2FACode(currentSessionToken, code)
                             token = accessToken
+                            saveToken(token)
                             runOnUiThread {
                                 tvStatus.text = "状态: 验证成功，可连接"
                                 Toast.makeText(this, "验证成功！", Toast.LENGTH_SHORT).show()
