@@ -8,8 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -99,7 +99,7 @@ func NewAntiCensorshipHTTPClient(timeout time.Duration, protectFn func(fd int)) 
 	dialer := &net.Dialer{
 		Timeout:   timeout,
 		KeepAlive: 30 * time.Second,
-		Control: func(network, address string, c syscallRawConn) error {
+		Control: func(network, address string, c syscall.RawConn) error {
 			if protectFn != nil {
 				return c.Control(func(fd uintptr) {
 					protectFn(int(fd))
@@ -134,9 +134,4 @@ func NewAntiCensorshipHTTPClient(timeout time.Duration, protectFn func(fd int)) 
 		Transport: transport,
 		Timeout:   timeout,
 	}
-}
-
-// 将前面定义的接口补全
-type syscallRawConn interface {
-	Control(f func(fd uintptr)) error
 }
