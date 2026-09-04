@@ -52,11 +52,8 @@ jobs:
       - name: Build Android APK
         run: |
           cd android
-          if [ ! -f "gradlew" ]; then
-            gradle wrapper
-          fi
-          chmod +x ./gradlew
-          ./gradlew assembleDebug --stacktrace
+          # 使用 Actions 环境内置的 gradle 命令直接构建
+          gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
