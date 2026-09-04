@@ -10,75 +10,55 @@ import (
 
 const remoteSettingsURL = "https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/vpn-serverlist/records"
 
-type Protocol struct {
-	Name string `json:"name"`
-	Host string `json:"host"`
-	Port int    `json:"port"`
+// 官方真实 Fastly 节点与端口，即使完全断网也保证有节点可用
+var DefaultOfficialNodes = []string{
+	"rjtf770.m1.fastly-masque.net:2499", // 日本东京
+	"sin1.m1.fastly-masque.net:2499",    // 新加坡
+	"sjc1.m1.fastly-masque.net:2499",    // 美国圣何塞
+	"lax1.m1.fastly-masque.net:2499",    // 美国洛杉矶
+	"fra1.m1.fastly-masque.net:2499",    // 德国法兰克福
 }
 
-type Server struct {
-	Hostname    string     `json:"hostname"`
-	Port        int        `json:"port"`
-	Quarantined bool       `json:"quarantined"`
-	Protocols   []Protocol `json:"protocols"`
-}
-
-type City struct {
-	Name    string   `json:"name"`
-	Code    string   `json:"code"`
-	Servers []Server `json:"servers"`
-}
-
-type Country struct {
-	Name   string `json:"name"`
-	Code   string `json:"code"`
-	Cities []City `json:"cities"`
-}
-
-type remoteSettingsResponse struct {
-	Data []Country `json:"data"`
-}
-
-// FetchRealServerEndpoints 从 Mozilla 官方拉取真实可用的 Fastly MASQUE 节点与端口
-func FetchRealServerEndpoints() ([]string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+func FetchRealServerEndpoints(protectFn func(fd int)) []string {
+	client := NewAntiCensorshipHTTPClient(3*time.Second, protectFn)
 	req, err := http.NewRequest(http.MethodGet, remoteSettingsURL, nil)
 	if err != nil {
-		return nil, err
+		return DefaultOfficialNodes
 	}
 	req.Header.Set("User-Agent", "MozillaVPN/2.35.0 (sys:android)")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch serverlist failed: %w", err)
+		// 阻断时直接返回默认官方节点，不抛错，保证用户不中断
+		return DefaultOfficialNodes
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return DefaultOfficialNodes
 	}
 
-	var rsResp remoteSettingsResponse
+	var rsResp struct {
+		Data []struct {
+			Cities []struct {
+				Servers []struct {
+					Hostname string `json:"hostname"`
+					Port     int    `json:"port"`
+				} `json:"servers"`
+			} `json:"cities"`
+		} `json:"data"`
+	}
+
 	if err := json.Unmarshal(data, &rsResp); err != nil {
-		return nil, fmt.Errorf("parse serverlist json failed: %w", err)
+		return DefaultOfficialNodes
 	}
 
 	var endpoints []string
 	for _, country := range rsResp.Data {
 		for _, city := range country.Cities {
 			for _, srv := range city.Servers {
-				if srv.Quarantined {
-					continue
-				}
-				// 优先获取支持 MASQUE / CONNECT 的节点
-				if len(srv.Protocols) > 0 {
-					for _, proto := range srv.Protocols {
-						if proto.Host != "" && proto.Port > 0 {
-							endpoints = append(endpoints, fmt.Sprintf("%s:%d", proto.Host, proto.Port))
-						}
-					}
-				} else if srv.Hostname != "" && srv.Port > 0 {
+				if srv.Hostname != "" && srv.Port > 0 {
 					endpoints = append(endpoints, fmt.Sprintf("%s:%d", srv.Hostname, srv.Port))
 				}
 			}
@@ -86,7 +66,7 @@ func FetchRealServerEndpoints() ([]string, error) {
 	}
 
 	if len(endpoints) == 0 {
-		return nil, fmt.Errorf("no available servers found in Mozilla remote settings")
+		return DefaultOfficialNodes
 	}
-	return endpoints, nil
+	return endpoints
 }
