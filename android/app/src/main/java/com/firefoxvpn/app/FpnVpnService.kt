@@ -17,6 +17,12 @@ class FpnVpnService : VpnService(), AndroidBridge {
     private var vpnInterface: ParcelFileDescriptor? = null
     private val channelId = "firefox_vpn_channel"
 
+    companion object {
+        const val ACTION_VPN_LOG = "com.firefoxvpn.app.VPN_LOG"
+        const val EXTRA_LOG_LEVEL = "LOG_LEVEL"
+        const val EXTRA_LOG_MSG = "LOG_MSG"
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -24,9 +30,8 @@ class FpnVpnService : VpnService(), AndroidBridge {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val accessToken = intent?.getStringExtra("ACCESS_TOKEN") ?: ""
-        val node = intent?.getStringExtra("NODE") ?: ""
 
-        // 1. 极其关键：必须在第一时间挂上前台服务通知，防止 Android 闪退
+        // 1. 挂上前台通知保活
         try {
             val notification = createNotification("Firefox VPN 正在安全连接中...")
             startForeground(1001, notification)
@@ -34,25 +39,26 @@ class FpnVpnService : VpnService(), AndroidBridge {
             e.printStackTrace()
         }
 
-        // 2. 建立系统虚拟网卡
+        // 2. 建立虚拟网卡，设置 Google DNS 和 Cloudflare DNS 避免 DNS 污染
         try {
             vpnInterface = Builder()
                 .setSession("FirefoxVPN")
                 .addAddress("10.0.0.2", 24)
+                .addDnsServer("8.8.8.8")
                 .addDnsServer("1.1.1.1")
-                .addRoute("0.0.0.0", 0)
+                .addRoute("0.0.0.0", 0) // 拦截全量公网流量
                 .setMtu(1500)
                 .establish()
         } catch (e: Exception) {
-            e.printStackTrace()
+            onLog("ERROR", "Create TUN interface failed: ${e.message}")
         }
 
-        // 3. 异步启动 Go 核心，杜绝阻塞主线程
+        // 3. 启动 Go 核心（自动获取真实节点，不再传假节点）
         Thread {
             try {
-                Core.startEngine(accessToken, node, this)
+                Core.startEngine(accessToken, this)
             } catch (e: Exception) {
-                e.printStackTrace()
+                onLog("ERROR", "StartEngine Exception: ${e.message}")
             }
         }.start()
 
@@ -60,11 +66,11 @@ class FpnVpnService : VpnService(), AndroidBridge {
     }
 
     override fun protectSocket(fd: Long): Boolean {
+        // 核心防回环
         return protect(fd.toInt())
     }
 
     override fun onStatusUpdate(status: String?) {
-        // 更新通知栏文字
         try {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.notify(1001, createNotification("状态: $status"))
@@ -73,7 +79,15 @@ class FpnVpnService : VpnService(), AndroidBridge {
         }
     }
 
-    override fun onLog(level: String?, message: String?) {}
+    // 关键修复：将 Service 里的每一条底层连接日志广播给主界面显示！
+    override fun onLog(level: String?, message: String?) {
+        val intent = Intent(ACTION_VPN_LOG).apply {
+            putExtra(EXTRA_LOG_LEVEL, level ?: "INFO")
+            putExtra(EXTRA_LOG_MSG, message ?: "")
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+    }
 
     override fun onDestroy() {
         super.onDestroy()
