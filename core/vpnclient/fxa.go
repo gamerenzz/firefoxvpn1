@@ -1,7 +1,6 @@
 package vpnclient
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -54,12 +53,12 @@ func deriveAuthPW(email, password string) ([]byte, error) {
 	return authPW, nil
 }
 
-func deriveHawkCredentials(tokenHex, context string) (id string, key []byte, err error) {
+func deriveHawkCredentials(tokenHex, contextStr string) (id string, key []byte, err error) {
 	tokenBytes, err := hex.DecodeString(tokenHex)
 	if err != nil {
 		return "", nil, fmt.Errorf("invalid token hex: %w", err)
 	}
-	info := []byte(protocolVersion + context)
+	info := []byte(protocolVersion + contextStr)
 	hkdfReader := hkdf.New(sha256.New, tokenBytes, nil, info)
 	out := make([]byte, 3*32)
 	if _, err := io.ReadFull(hkdfReader, out); err != nil {
