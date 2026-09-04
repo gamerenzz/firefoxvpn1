@@ -43,6 +43,7 @@ func RegisterBridge(bridge AndroidBridge) {
 	logToUI("INFO", "Bridge registered successfully")
 }
 
+// LoginWithPassword 原生账号密码登录（带官方 Client ID 签名）
 func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
 	logToUI("INFO", "Logging in with official Mozilla VPN client ID...")
 	resp, err := vpnclient.DirectLogin(email, password)
@@ -51,6 +52,7 @@ func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
 		return nil, err
 	}
 
+	// 账号触发二次验证
 	if !resp.Verified {
 		logToUI("WARN", "Account requires email 2FA verification")
 		return &DirectLoginResult{
@@ -59,6 +61,7 @@ func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
 		}, nil
 	}
 
+	// 直接换取 OAuth AccessToken
 	logToUI("INFO", "Exchanging session token for VPN AccessToken...")
 	token, err := vpnclient.ExchangeSessionToOAuthToken(resp.SessionToken)
 	if err != nil {
@@ -73,6 +76,7 @@ func LoginWithPassword(email, password string) (*DirectLoginResult, error) {
 	}, nil
 }
 
+// Submit2FACode 提交邮箱验证码
 func Submit2FACode(sessionToken, code string) (string, error) {
 	logToUI("INFO", "Submitting 2FA verification code...")
 	if err := vpnclient.VerifySessionCode(sessionToken, code); err != nil {
@@ -89,7 +93,7 @@ func Submit2FACode(sessionToken, code string) (string, error) {
 	return token, nil
 }
 
-// StartEngine 自动获取真实节点、换取 ProxyPass 并连接
+// StartEngine 自动通过 DoH/Clean-IP 换取 ProxyPass 并连接真实 Fastly MASQUE 节点
 func StartEngine(accessToken string, bridge AndroidBridge) (string, error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -100,34 +104,30 @@ func StartEngine(accessToken string, bridge AndroidBridge) (string, error) {
 	RegisterBridge(bridge)
 	bridge.OnStatusUpdate("CONNECTING")
 
-	// 1. 从 Mozilla 官方拉取最新真实节点列表
-	logToUI("INFO", "Fetching official Fastly nodes from Mozilla Remote Settings...")
-	endpoints, err := vpnclient.FetchRealServerEndpoints()
-	if err != nil {
-		logToUI("WARN", "Fetch serverlist failed: %v. Using fallback node.", err)
-		// 备用真实 Fastly 节点 (带正确的端口 2499)
-		endpoints = []string{"rjtf770.m1.fastly-masque.net:2499", "lfpb115.m1.fastly-masque.net:2499"}
-	} else {
-		logToUI("INFO", "Fetched %d official VPN nodes successfully", len(endpoints))
+	protectFunc := func(fd int) {
+		bridge.ProtectSocket(fd)
 	}
 
-	// 2. 并发探测最快节点 (取前 10 个测试)
+	// 1. 通过防污染通道拉取官方节点（若超时秒切内置真实官方节点池）
+	logToUI("INFO", "Loading official Fastly nodes (with DoH/Clean-IP protection)...")
+	endpoints := vpnclient.FetchRealServerEndpoints(protectFunc)
+	logToUI("INFO", "Loaded %d candidate nodes", len(endpoints))
+
+	// 2. 并发探测最低延迟节点 (取前 5 个进行快速 RTT 竞速)
 	testCandidates := endpoints
-	if len(testCandidates) > 10 {
-		testCandidates = testCandidates[:10]
+	if len(testCandidates) > 5 {
+		testCandidates = testCandidates[:5]
 	}
 	logToUI("INFO", "Probing lowest latency node...")
-	bestNode := vpnclient.ProbeFastestNode(testCandidates, 2*time.Second, func(fd int) {
-		bridge.ProtectSocket(fd)
-	})
+	bestNode := vpnclient.ProbeFastestNode(testCandidates, 2*time.Second, protectFunc)
 	if bestNode == "" {
 		bestNode = endpoints[0]
 	}
 	logToUI("INFO", "Selected best node: %s", bestNode)
 
-	// 3. 用 AccessToken 向 Guardian 换取 Proxy Pass JWT
-	logToUI("INFO", "Fetching Proxy Pass JWT from Mozilla Guardian...")
-	proxyPassJWT, err := vpnclient.GetProxyPassWithToken(accessToken)
+	// 3. 用 AccessToken 通过防 DNS 污染与 Clean IP 通道向 Guardian 换取 Proxy Pass JWT
+	logToUI("INFO", "Fetching Proxy Pass JWT via Clean IP...")
+	proxyPassJWT, err := vpnclient.GetProxyPassWithToken(accessToken, protectFunc)
 	if err != nil {
 		logToUI("ERROR", "Fetch Proxy Pass failed: %v", err)
 		bridge.OnStatusUpdate("FAILED")
@@ -135,10 +135,8 @@ func StartEngine(accessToken string, bridge AndroidBridge) (string, error) {
 	}
 	logToUI("INFO", "Proxy Pass obtained! Connecting HTTP/3 tunnel to %s...", bestNode)
 
-	// 4. 建立底层 HTTP/3 隧道
-	session, err := vpnclient.NewH3Session(bestNode, proxyPassJWT, 15*time.Second, func(fd int) {
-		bridge.ProtectSocket(fd)
-	})
+	// 4. 建立底层抗丢包 HTTP/3 (QUIC/UDP) 隧道
+	session, err := vpnclient.NewH3Session(bestNode, proxyPassJWT, 15*time.Second, protectFunc)
 	if err != nil {
 		logToUI("ERROR", "HTTP/3 Upstream connect failed: %v", err)
 		bridge.OnStatusUpdate("FAILED")
@@ -161,6 +159,7 @@ func StartEngine(accessToken string, bridge AndroidBridge) (string, error) {
 	return localAddr, nil
 }
 
+// StopEngine 停止并关闭所有网络通道
 func StopEngine() {
 	logToUI("INFO", "Stopping Core Engine...")
 	if localBridge != nil {
