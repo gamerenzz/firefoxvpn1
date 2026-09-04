@@ -14,7 +14,6 @@ android {
         versionCode 1
         versionName "1.0.0"
 
-        // 锁定为 arm64 架构，与之前 gomobile 编译的 core.aar 保持绝对一致
         ndk {
             abiFilters 'arm64-v8a'
         }
@@ -44,8 +43,8 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
-    implementation 'androidx.browser:browser:1.8.0' // 登录时调用 Chrome Custom Tabs 所需
+    implementation 'androidx.browser:browser:1.8.0'
 
-    // 核心：引入 gomobile 编译生成的动态库 AAR
+    // 引入 gomobile 编译产出的 AAR
     implementation(name: 'core', ext: 'aar')
 }
