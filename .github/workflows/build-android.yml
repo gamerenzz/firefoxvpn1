@@ -16,7 +16,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.23'
           cache: false
 
       - name: Setup Java
@@ -41,12 +41,11 @@ jobs:
           cd core
           go mod tidy
           mkdir -p ../android/app/libs
-          gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar
+          gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
 
       - name: Build Android APK
         run: |
           cd android
-          # 如果没有现成的 gradlew，自动生成一个
           if [ ! -f "gradlew" ]; then
             gradle wrapper
           fi
