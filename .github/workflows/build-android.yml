@@ -41,7 +41,7 @@ jobs:
           cd core
           go mod tidy
           mkdir -p ../android/app/libs
-          gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
+          gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar
 
       - name: Build Android APK
         run: |
