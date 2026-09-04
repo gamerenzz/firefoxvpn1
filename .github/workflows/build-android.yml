@@ -1,7 +1,7 @@
 name: Build Android APK
 
 on:
-  workflow_dispatch: # 支持手动一键点击触发构建
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -30,24 +30,31 @@ jobs:
         with:
           ndk-version: r26b
 
-      - name: Install Gomobile
+      - name: Install Gomobile Tool
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
           gomobile init
 
-      - name: Compile Go Core to Android AAR
+      - name: Compile Go Core to AAR
         run: |
           cd core
-          gomobile bind -v -target=android/arm64 -o ../android/app/libs/core.aar .
+          go mod tidy
+          mkdir -p ../android/app/libs
+          gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
 
       - name: Build Android APK
         run: |
           cd android
+          # 如果没有现成的 gradlew，自动生成一个
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+          fi
           chmod +x ./gradlew
           ./gradlew assembleDebug --stacktrace
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: FirefoxVPN-debug.apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/debug/*.apk
