@@ -16,7 +16,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.24'
           cache: false
 
       - name: Setup Java
@@ -39,7 +39,8 @@ jobs:
       - name: Compile Go Core to AAR
         run: |
           cd core
-          go get golang.org/x/mobile/bind
+          # 按照官方提示添加 tool 绑定依赖
+          go get -tool golang.org/x/mobile/cmd/gobind
           go mod tidy
           mkdir -p ../android/app/libs
           gomobile bind -v -androidapi 21 -target=android/arm64 -o ../android/app/libs/core.aar .
