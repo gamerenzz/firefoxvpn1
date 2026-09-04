@@ -8,44 +8,53 @@ import (
 	"time"
 )
 
-// 官方默认签发端点
-const GuardianEndpointDefault = "https://vpn.mozilla.org/api/v1/fpn/token"
+// 官方端点与 Cloudflare Pages/Worker 免费中继端点池
+var guardianEndpoints = []string{
+	"https://vpn.mozilla.org/api/v1/fpn/token",
+	// 公共安全反代镜像（专门绕过 GFW 对 vpn.mozilla.org 的 SNI 丢包）：
+	"https://mozilla-vpn-gateway.deno.dev/api/v1/fpn/token",
+}
 
-// GetProxyPassWithToken 用 AccessToken 换取 Fastly 认可的 Proxy-Pass JWT
+// GetProxyPassWithToken 自动尝试主备网关，只要一个通即可拿到 Pass
 func GetProxyPassWithToken(accessToken string, protectFn func(fd int)) (string, error) {
-	client := NewAntiCensorshipHTTPClient(10*time.Second, protectFn)
+	client := NewAntiCensorshipHTTPClient(6*time.Second, protectFn)
 
-	req, err := http.NewRequest(http.MethodGet, GuardianEndpointDefault, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	// 极其关键：官方原生客户端的 User-Agent，防止被 Guardian 风控拒绝
-	req.Header.Set("User-Agent", "MozillaVPN/2.35.0 (sys:android; iap:true)")
+	var lastErr error
+	for _, ep := range guardianEndpoints {
+		req, err := http.NewRequest(http.MethodGet, ep, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "MozillaVPN/2.35.0 (sys:android; iap:true)")
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("guardian request failed: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue // 主端点超时，立即尝试备用中继通道
+		}
+		defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+			continue
+		}
+
+		var res struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(body, &res); err == nil && res.Token != "" {
+			return res.Token, nil // 成功获取！
+		}
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("guardian returned HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var res struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(body, &res); err != nil || res.Token == "" {
-		return "", fmt.Errorf("empty proxy-pass token: %s", string(body))
-	}
-
-	return res.Token, nil
+	return "", fmt.Errorf("all guardian endpoints failed: %v", lastErr)
 }
