@@ -16,7 +16,7 @@ import (
 
 type H3Session struct {
 	rt        *http3.Transport
-	conn      quic.Connection // 修复：quic-go 标准接口类型
+	conn      quic.EarlyConnection // 修复：匹配 http3 的 EarlyConnection 类型
 	udpConn   *net.UDPConn
 	proxyHost string
 	token     string
@@ -66,14 +66,16 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 	defer cancel()
 
 	udpRemote := &net.UDPAddr{IP: ips[0], Port: port}
-	qConn, err := quic.Dial(ctx, uc, udpRemote, tlsCfg, quicCfg)
+	// 修复：使用 DialEarly 建立支持 0-RTT 的早期连接
+	qConn, err := quic.DialEarly(ctx, uc, udpRemote, tlsCfg, quicCfg)
 	if err != nil {
 		uc.Close()
-		return nil, fmt.Errorf("quic dial: %w", err)
+		return nil, fmt.Errorf("quic dial early: %w", err)
 	}
 
+	// 修复：返回签名严格对齐 http3.Transport.Dial
 	rt := &http3.Transport{
-		Dial: func(_ context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.Connection, error) {
+		Dial: func(_ context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			return qConn, nil
 		},
 	}
