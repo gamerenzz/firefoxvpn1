@@ -13,9 +13,15 @@ type AndroidBridge interface {
 	OnLog(level string, message string)
 }
 
+// AuthSessionResult 封装为结构体，完全符合 Gomobile 跨语言规范
+type AuthSessionResult struct {
+	AuthURL  string
+	Verifier string
+}
+
 var (
-	activeSession *vpnclient.H3Session
-	localBridge   *vpnclient.LocalBridge
+	activeSession  *vpnclient.H3Session
+	localBridge    *vpnclient.LocalBridge
 	bridgeInstance AndroidBridge
 	bridgeMu       sync.RWMutex
 )
@@ -37,15 +43,19 @@ func RegisterBridge(bridge AndroidBridge) {
 	logToUI("INFO", "Bridge registered successfully")
 }
 
-func InitAuthURL() (string, string, error) {
+// InitAuthURL 改为返回 (*AuthSessionResult, error)，100% 兼容 Java
+func InitAuthURL() (*AuthSessionResult, error) {
 	logToUI("INFO", "Initializing PKCE OAuth flow...")
 	sess, err := vpnclient.GeneratePKCEAuthURL()
 	if err != nil {
 		logToUI("ERROR", "PKCE Gen Failed: %v", err)
-		return "", "", err
+		return nil, err
 	}
 	logToUI("INFO", "OAuth URL generated successfully")
-	return sess.AuthURL, sess.Verifier, nil
+	return &AuthSessionResult{
+		AuthURL:  sess.AuthURL,
+		Verifier: sess.Verifier,
+	}, nil
 }
 
 func FinishAuthCode(code, verifier string) (string, error) {
