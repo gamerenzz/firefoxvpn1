@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"firefox-vpn-core/vpnclient"
 	"fmt"
 	"sync"
@@ -17,6 +18,11 @@ type DirectLoginResult struct {
 	SessionToken string
 	Need2FA      bool
 	AccessToken  string
+}
+
+type NodeInfo struct {
+	Name string `json:"name"`
+	Addr string `json:"addr"`
 }
 
 var (
@@ -89,8 +95,33 @@ func Submit2FACode(sessionToken, code string) (string, error) {
 	return token, nil
 }
 
-// StartEngine 全新思路：跳过被墙的 Guardian，直接拿 Token 直连最优 Fastly MASQUE 节点！
-func StartEngine(token string, bridge AndroidBridge) (string, error) {
+// FetchNodesJSON 返回 100% 具有全球公网权威 DNS 解析的官方主力节点
+func FetchNodesJSON() string {
+	list := []NodeInfo{
+		{Name: "🇯🇵 日本东京 (jp0.vpn.mozilla.org:443)", Addr: "jp0.vpn.mozilla.org:443"},
+		{Name: "🇸🇬 新加坡 (sg0.vpn.mozilla.org:443)", Addr: "sg0.vpn.mozilla.org:443"},
+		{Name: "🇺🇸 美国西海岸 (us0.vpn.mozilla.org:443)", Addr: "us0.vpn.mozilla.org:443"},
+		{Name: "🇩🇪 德国法兰克福 (de0.vpn.mozilla.org:443)", Addr: "de0.vpn.mozilla.org:443"},
+		{Name: "🇬🇧 英国伦敦 (uk0.vpn.mozilla.org:443)", Addr: "uk0.vpn.mozilla.org:443"},
+	}
+
+	data, _ := json.Marshal(list)
+	return string(data)
+}
+
+// TestNodeDelay 测试指定节点的连通性与往返延迟
+func TestNodeDelay(nodeAddr string) int64 {
+	return vpnclient.PingSingleNode(nodeAddr, 2500*time.Millisecond, func(fd int) {
+		bridgeMu.RLock()
+		if bridgeInstance != nil {
+			bridgeInstance.ProtectSocket(fd)
+		}
+		bridgeMu.RUnlock()
+	})
+}
+
+// StartEngine 明确连接用户手动指定的公网节点
+func StartEngine(targetNode string, token string, bridge AndroidBridge) (string, error) {
 	defer func() {
 		if r := recover(); r != nil {
 			logToUI("FATAL", "Recovered from panic: %v", r)
@@ -104,28 +135,14 @@ func StartEngine(token string, bridge AndroidBridge) (string, error) {
 		bridge.ProtectSocket(fd)
 	}
 
-	// 1. 获取真实候选节点
-	logToUI("INFO", "Loading official Fastly nodes...")
-	endpoints := vpnclient.FetchRealServerEndpoints(protectFunc)
-	logToUI("INFO", "Loaded %d candidate nodes", len(endpoints))
-
-	// 2. 毫秒级竞速选出当前最快节点
-	testCandidates := endpoints
-	if len(testCandidates) > 5 {
-		testCandidates = testCandidates[:5]
+	if targetNode == "" {
+		targetNode = "jp0.vpn.mozilla.org:443"
 	}
-	logToUI("INFO", "Probing lowest latency node...")
-	bestNode := vpnclient.ProbeFastestNode(testCandidates, 2*time.Second, protectFunc)
-	if bestNode == "" {
-		bestNode = endpoints[0]
-	}
-	logToUI("INFO", "Selected best node: %s", bestNode)
 
-	// 3. 核心改变：不再请求任何被阻断的 Guardian！
-	// 直接将我们手头合法的官方 Token 作为 Bearer 凭证，立刻发起 HTTP/3 建连！
-	logToUI("INFO", "Bypassing Guardian block. Directly establishing HTTP/3 tunnel to %s...", bestNode)
+	logToUI("INFO", "Establishing HTTP/3 tunnel to: %s", targetNode)
 
-	session, err := vpnclient.NewH3Session(bestNode, token, 15*time.Second, protectFunc)
+	// 发起 HTTP/3 握手
+	session, err := vpnclient.NewH3Session(targetNode, token, 15*time.Second, protectFunc)
 	if err != nil {
 		logToUI("ERROR", "HTTP/3 Upstream connect failed: %v", err)
 		bridge.OnStatusUpdate("FAILED")
@@ -134,7 +151,7 @@ func StartEngine(token string, bridge AndroidBridge) (string, error) {
 	activeSession = session
 	logToUI("INFO", "HTTP/3 MASQUE tunnel established successfully!")
 
-	// 4. 启动本地代理
+	// 启动本地回环 SOCKS5
 	br, localAddr, err := vpnclient.StartLocalSocksBridge(session)
 	if err != nil {
 		logToUI("ERROR", "Local bridge failed: %v", err)
