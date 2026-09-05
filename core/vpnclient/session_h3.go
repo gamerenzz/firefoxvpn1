@@ -26,18 +26,17 @@ type H3Session struct {
 func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func(fd int)) (*H3Session, error) {
 	host, portStr, err := net.SplitHostPort(proxyAddr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid proxy address %s: %w", proxyAddr, err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid proxy port %s: %w", portStr, err)
+		port = 443
 	}
 
-	// 核心修复：优先通过 DoH 获取未被国内运营商污染/拦截的真实 IP，彻底解决 "no such host"
+	// 1. 防 DNS 污染安全解析真实 IP
 	cleanIPStr := ResolveCleanIP(host)
 	targetIP := net.ParseIP(cleanIPStr)
 	if targetIP == nil {
-		// 如果 DoH 没直接返回纯 IP，退回使用系统底层解析
 		ips, err := net.LookupIP(host)
 		if err != nil || len(ips) == 0 {
 			return nil, fmt.Errorf("resolve %s failed: %w", host, err)
@@ -45,13 +44,13 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 		targetIP = ips[0]
 	}
 
-	// 1. 创建本地 UDP 套接字
+	// 2. 创建本地 UDP 套接字
 	uc, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
 	if err != nil {
 		return nil, fmt.Errorf("listen udp failed: %w", err)
 	}
 
-	// 2. 执行 Android VpnService.protect() 防回环（生命线）
+	// 3. 核心：执行 Android VpnService.protect() 保证底层流量不产生回环死循环
 	if protectFn != nil {
 		rawConn, err := uc.SyscallConn()
 		if err == nil {
@@ -62,7 +61,7 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 	}
 
 	tlsCfg := &tls.Config{
-		ServerName: host, // TLS SNI 依然保留节点域名，保证证书验证通过
+		ServerName: host,
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{"h3"},
 	}
@@ -74,14 +73,22 @@ func NewH3Session(proxyAddr, token string, timeout time.Duration, protectFn func
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// 3. 目标地址使用真实解析出来的 targetIP
+	// 4. 发起 QUIC 0-RTT 握手（首选目标端口，如果非 443 端口受阻，自动回退到 443 端口尝试）
 	udpRemote := &net.UDPAddr{IP: targetIP, Port: port}
 	qConn, err := quic.DialEarly(ctx, uc, udpRemote, tlsCfg, quicCfg)
 	if err != nil {
-		uc.Close()
-		return nil, fmt.Errorf("quic dial early to %s (%s): %w", host, targetIP.String(), err)
+		// 容错回退：部分节点在公网标准开放的是 443 端口
+		if port != 443 {
+			udpRemote443 := &net.UDPAddr{IP: targetIP, Port: 443}
+			qConn, err = quic.DialEarly(ctx, uc, udpRemote443, tlsCfg, quicCfg)
+		}
+		if err != nil {
+			uc.Close()
+			return nil, fmt.Errorf("quic dial to %s (ip: %s) failed: %w", proxyAddr, targetIP.String(), err)
+		}
 	}
 
+	// 5. 组装支持标准 HTTP/3 CONNECT 的 RoundTripper
 	rt := &http3.Transport{
 		Dial: func(_ context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			return qConn, nil
