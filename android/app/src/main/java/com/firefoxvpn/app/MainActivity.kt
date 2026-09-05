@@ -38,7 +38,7 @@ class MainActivity : Activity(), AndroidBridge {
 
     private var currentSessionToken = ""
     private var token = ""
-    // 默认选用离中国大陆最近、100% 具备公网 A 记录解析的日本东京主力节点
+    // 默认选用离中国大陆最近、100% 具备全球公网解析的日本东京节点
     private var selectedNodeAddr = "jp0.vpn.mozilla.org:443"
     private val PREFS_NAME = "FirefoxVPNPrefs"
     private val KEY_SAVED_TOKEN = "SavedProxyToken"
@@ -82,20 +82,20 @@ class MainActivity : Activity(), AndroidBridge {
 
         loadSavedToken()
 
-        // 初始化加载候选真实节点
+        // 1. 初始化加载候选真实节点列表
         loadCandidateNodes()
 
-        // 刷新节点列表
+        // 2. 刷新节点按钮
         btnRefreshNodes.setOnClickListener {
             loadCandidateNodes()
         }
 
-        // 一键测速所有节点
+        // 3. 一键并发测速按钮
         btnPingAll.setOnClickListener {
             pingAllNodes()
         }
 
-        // 登录
+        // 4. 账号密码直接登录
         btnLogin.setOnClickListener {
             val email = etEmail.text.toString().trim()
             val password = etPassword.text.toString().trim()
@@ -126,7 +126,7 @@ class MainActivity : Activity(), AndroidBridge {
             }.start()
         }
 
-        // 连接选中的节点
+        // 5. 连接选中的 VPN 节点
         btnConnect.setOnClickListener {
             if (token.isEmpty()) {
                 Toast.makeText(this, "请先登录账号，或长按此按钮导入 Token", Toast.LENGTH_SHORT).show()
@@ -140,11 +140,13 @@ class MainActivity : Activity(), AndroidBridge {
             }
         }
 
+        // 长按连接按钮弹出手动导入弹窗
         btnConnect.setOnLongClickListener {
             showImportTokenDialog()
             true
         }
 
+        // 全选复制日志
         btnCopyAll.setOnClickListener {
             val fullText = etLogs.text.toString()
             if (fullText.isNotEmpty()) {
@@ -154,11 +156,12 @@ class MainActivity : Activity(), AndroidBridge {
             }
         }
 
+        // 清空日志
         btnClearLog.setOnClickListener { etLogs.setText("") }
     }
 
     private fun loadCandidateNodes() {
-        onLog("INFO", "Loading verified public node list...")
+        onLog("INFO", "Loading verified node list from core...")
         Thread {
             try {
                 val jsonStr = Core.fetchNodesJSON()
@@ -192,7 +195,7 @@ class MainActivity : Activity(), AndroidBridge {
 
                         rgNodes.addView(rb)
                     }
-                    onLog("INFO", "Loaded ${jsonArray.length()} verified public nodes")
+                    onLog("INFO", "Loaded ${jsonArray.length()} candidate nodes")
                 }
             } catch (e: Exception) {
                 onLog("ERROR", "Failed to load nodes: ${e.message}")
@@ -305,6 +308,7 @@ class MainActivity : Activity(), AndroidBridge {
         if (requestCode == 100 && resultCode == RESULT_OK) {
             onLog("INFO", "Starting tunnel with selected node: $selectedNodeAddr")
             val intent = Intent(this, FpnVpnService::class.java).apply {
+                // 确保两个 Key 与 FpnVpnService 严格对齐
                 putExtra("ACCESS_TOKEN", token)
                 putExtra("TARGET_NODE", selectedNodeAddr)
             }
