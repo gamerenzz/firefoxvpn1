@@ -30,8 +30,10 @@ class FpnVpnService : VpnService(), AndroidBridge {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val accessToken = intent?.getStringExtra("ACCESS_TOKEN") ?: ""
+        // 接收 MainActivity 传过来的选定节点，默认使用日本东京
+        val targetNode = intent?.getStringExtra("TARGET_NODE") ?: "jp0.vpn.mozilla.org:443"
 
-        // 1. 挂上前台通知保活
+        // 1. 启动前台服务通知（防止系统杀进程）
         try {
             val notification = createNotification("Firefox VPN 正在安全连接中...")
             startForeground(1001, notification)
@@ -39,24 +41,25 @@ class FpnVpnService : VpnService(), AndroidBridge {
             e.printStackTrace()
         }
 
-        // 2. 建立虚拟网卡，设置 Google DNS 和 Cloudflare DNS 避免 DNS 污染
+        // 2. 建立虚拟网卡，拦截全量流量
         try {
             vpnInterface = Builder()
                 .setSession("FirefoxVPN")
                 .addAddress("10.0.0.2", 24)
                 .addDnsServer("8.8.8.8")
                 .addDnsServer("1.1.1.1")
-                .addRoute("0.0.0.0", 0) // 拦截全量公网流量
+                .addRoute("0.0.0.0", 0)
                 .setMtu(1500)
                 .establish()
         } catch (e: Exception) {
             onLog("ERROR", "Create TUN interface failed: ${e.message}")
         }
 
-        // 3. 启动 Go 核心（自动获取真实节点，不再传假节点）
+        // 3. 核心对齐：调用 3 个参数的 Core.startEngine(targetNode, token, bridge)
         Thread {
             try {
-                Core.startEngine(accessToken, this)
+                val localSocks = Core.startEngine(targetNode, accessToken, this)
+                onLog("INFO", "VPN Core running at: $localSocks")
             } catch (e: Exception) {
                 onLog("ERROR", "StartEngine Exception: ${e.message}")
             }
@@ -79,7 +82,6 @@ class FpnVpnService : VpnService(), AndroidBridge {
         }
     }
 
-    // 关键修复：将 Service 里的每一条底层连接日志广播给主界面显示！
     override fun onLog(level: String?, message: String?) {
         val intent = Intent(ACTION_VPN_LOG).apply {
             putExtra(EXTRA_LOG_LEVEL, level ?: "INFO")
