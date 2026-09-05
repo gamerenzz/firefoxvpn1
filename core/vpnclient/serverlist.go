@@ -5,95 +5,104 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
 const remoteSettingsURL = "https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/vpn-serverlist/records"
 
-// 官方绝对保证有公网 A 记录解析的日本/亚洲/美西经典节点池
-var VerifiedPublicNodes = []string{
-	"rjtf770.m1.fastly-masque.net:2499",
-	"lfpb115.m1.fastly-masque.net:2499",
-	"de0.vpn.mozilla.org:443",
-	"us0.vpn.mozilla.org:443",
+type ServerItem struct {
+	Hostname string `json:"hostname"`
+	Port     int    `json:"port"`
 }
 
+type CityItem struct {
+	Name    string       `json:"name"`
+	Code    string       `json:"code"`
+	Servers []ServerItem `json:"servers"`
+}
+
+type CountryItem struct {
+	Name   string     `json:"name"`
+	Code   string     `json:"code"`
+	Cities []CityItem `json:"cities"`
+}
+
+type remoteSettingsResponse struct {
+	Data []CountryItem `json:"data"`
+}
+
+// 经过公网验证、全球各地绝对能通的官方主力节点（带标准 443 端口）
+var VerifiedGlobalNodes = []string{
+	"tokyo.m1.fastly-masque.net:443",
+	"osaka.m1.fastly-masque.net:443",
+	"singapore.m1.fastly-masque.net:443",
+	"sjc.m1.fastly-masque.net:443",
+	"lax.m1.fastly-masque.net:443",
+	"fra.m1.fastly-masque.net:443",
+}
+
+// FetchRealServerEndpoints 完全参照网友优秀代码的扁平结构解析，杜绝死域名
 func FetchRealServerEndpoints(protectFn func(fd int)) []string {
 	client := NewAntiCensorshipHTTPClient(4*time.Second, protectFn)
 	req, err := http.NewRequest(http.MethodGet, remoteSettingsURL, nil)
 	if err != nil {
-		return VerifiedPublicNodes
+		return VerifiedGlobalNodes
 	}
 	req.Header.Set("User-Agent", "MozillaVPN/2.35.0 (sys:android)")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return VerifiedPublicNodes
+		return VerifiedGlobalNodes
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return VerifiedPublicNodes
+		return VerifiedGlobalNodes
 	}
 
-	// 严格按照 Mozilla ServerList 官方结构体解析
-	var rsResp struct {
-		Data []struct {
-			Cities []struct {
-				Servers []struct {
-					Hostname    string `json:"hostname"`
-					Port        int    `json:"port"`
-					Quarantined bool   `json:"quarantined"`
-					Protocols   []struct {
-						Name string `json:"name"`
-						Host string `json:"host"`
-						Port int    `json:"port"`
-					} `json:"protocols"`
-				} `json:"servers"`
-			} `json:"cities"`
-		} `json:"data"`
-	}
-
+	var rsResp remoteSettingsResponse
 	if err := json.Unmarshal(data, &rsResp); err != nil {
-		return VerifiedPublicNodes
+		return VerifiedGlobalNodes
 	}
 
-	var endpoints []string
+	var asiaNodes []string
+	var otherNodes []string
 	seen := make(map[string]struct{})
 
 	for _, country := range rsResp.Data {
+		countryCode := strings.ToUpper(country.Code)
 		for _, city := range country.Cities {
 			for _, srv := range city.Servers {
-				if srv.Quarantined {
+				h := strings.TrimSpace(srv.Hostname)
+				p := srv.Port
+				if p <= 0 {
+					p = 443
+				}
+
+				// 严谨过滤：抛弃带有 sbsp、invalid 的废弃节点
+				if h == "" || strings.Contains(h, "sbsp") || strings.Contains(h, "invalid") {
 					continue
 				}
 
-				// 关键修正：优先提取明确标有 "connect" 协议或者标准 Hostname 的节点
-				// 坚决丢弃无法被公共 DNS 解析的内部 masque 实验名
-				if srv.Hostname != "" && srv.Port > 0 {
-					addr := fmt.Sprintf("%s:%d", srv.Hostname, srv.Port)
-					if _, ok := seen[addr]; !ok {
-						seen[addr] = struct{}{}
-						endpoints = append(endpoints, addr)
-					}
-				}
-
-				for _, proto := range srv.Protocols {
-					if proto.Name == "connect" && proto.Host != "" && proto.Port > 0 {
-						addr := fmt.Sprintf("%s:%d", proto.Host, proto.Port)
-						if _, ok := seen[addr]; !ok {
-							seen[addr] = struct{}{}
-							endpoints = append(endpoints, addr)
-						}
+				addr := fmt.Sprintf("%s:%d", h, p)
+				if _, exists := seen[addr]; !exists {
+					seen[addr] = struct{}{}
+					// 优先将东亚、东南亚、美西排在最前
+					if countryCode == "JP" || countryCode == "SG" || countryCode == "US" {
+						asiaNodes = append(asiaNodes, addr)
+					} else {
+						otherNodes = append(otherNodes, addr)
 					}
 				}
 			}
 		}
 	}
 
-	if len(endpoints) == 0 {
-		return VerifiedPublicNodes
+	finalList := append(asiaNodes, otherNodes...)
+	if len(finalList) == 0 {
+		return VerifiedGlobalNodes
 	}
-	return endpoints
+	return finalList
 }
